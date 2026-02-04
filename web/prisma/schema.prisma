@@ -1,0 +1,142 @@
+// 1. Cấu hình Database
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql" // Easypanel supports Postgres well
+}
+
+// --------------------------------------
+// 2. ENUMS
+// --------------------------------------
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum AccountType {
+  UNLIMITED     // Gói 2tr (6 luồng)
+  PAY_AS_YOU_GO // Gói 200k (Xả lũ/VIP)
+}
+
+enum AccountStatus {
+  ACTIVE      // Đang hoạt động tốt
+  PAUSED      // Tạm dừng thủ công
+  ERROR       // Lỗi liên tục (Circuit Breaker kích hoạt)
+  EXPIRED     // Hết hạn gói hoặc hết quota
+}
+
+enum TaskStatus {
+  PENDING     // Đang trong hàng chờ (Ảo hoặc Thật)
+  PROCESSING  // Đang gửi sang Gommo AI
+  COMPLETED   // Đã có ảnh
+  FAILED      // Lỗi
+}
+
+enum TransactionType {
+  DEPOSIT     // Nạp tiền
+  SPEND       // Trừ tiền tạo ảnh
+  REFUND      // Hoàn tiền khi lỗi (Cần thiết để giữ uy tín)
+}
+
+// --------------------------------------
+// 3. MODELS
+// --------------------------------------
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  password      String    
+  role          Role      @default(USER)
+  
+  // Quản lý ví & API cho Resell
+  creditBalance Float     @default(0) 
+  apiKey        String?   @unique     // Key để khách của bạn gọi API từ xa
+  
+  // Chiến thuật kinh doanh
+  isVip         Boolean   @default(false) // True -> Ưu tiên dùng gói 200k xả lũ ngay
+  rateLimit     Int       @default(2)     // Số luồng tối đa cho mỗi khách API
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  transactions  Transaction[]
+  generations   GenerationTask[]
+}
+
+model ProviderAccount {
+  id              String        @id @default(cuid())
+  name            String        // VD: "Account_1_Unlimited"
+  apiKey          String        // Token thật từ Gommo AI
+  
+  type            AccountType   @default(UNLIMITED)
+  priority        Int           @default(1) // 1: Dùng trước (Unlimited), 2: Dự phòng (PayG)
+  
+  concurrencyLimit Int          @default(6) // Giới hạn luồng (thường là 6)
+  status           AccountStatus @default(ACTIVE)
+  
+  // Quản lý Quota
+  totalUsage       Int          @default(0)
+  maxUsageLimit    Int?         // 2000 cho gói 200k, null cho Unlimited
+  
+  // STEALTH MODE (Tàng hình)
+  proxyUrl         String?      // Proxy riêng cho từng tài khoản
+  userAgent        String?      // User-Agent riêng biệt
+  
+  // Circuit Breaker (Tự ngắt khi lỗi)
+  errorCount       Int          @default(0) 
+  lastErrorAt      DateTime?
+  
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  tasks            GenerationTask[]
+}
+
+model GenerationTask {
+  id              String      @id @default(cuid())
+  
+  // Thông số ảnh
+  prompt          String
+  negativePrompt  String?
+  width           Int         @default(1024)
+  height          Int         @default(1024)
+  modelSupported  String?     // Lưu model đã dùng (Banana Pro, etc.)
+  
+  // Trạng thái
+  status          TaskStatus  @default(PENDING)
+  providerTaskId  String?     // ID của task bên Gommo (id_base)
+  resultUrl       String?     
+  errorMessage    String?
+  
+  // PHÂN TÍCH LỢI NHUẬN
+  costToUser      Float       // Số credit khách phải trả (VD: 500)
+  costIncurred    Float       @default(0) // Giá vốn (0 nếu Unlimited, 100 nếu PayG)
+  
+  createdAt       DateTime    @default(now())
+  startedAt       DateTime?   // Thời điểm thực tế bắt đầu tạo
+  completedAt     DateTime?   
+  
+  userId            String
+  user              User             @relation(fields: [userId], references: [id])
+  
+  providerAccountId String?          
+  providerAccount   ProviderAccount? @relation(fields: [providerAccountId], references: [id])
+
+  @@index([status])
+  @@index([userId])
+}
+
+model Transaction {
+  id          String          @id @default(cuid())
+  amount      Float           
+  type        TransactionType
+  description String?
+  
+  userId      String
+  user        User            @relation(fields: [userId], references: [id])
+  
+  createdAt   DateTime        @default(now())
+}
